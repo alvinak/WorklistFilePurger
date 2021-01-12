@@ -434,6 +434,7 @@ extern "C"
   {
     return "worklist-file-purger";
   }
+	
 
 
   ORTHANC_PLUGINS_API const char* OrthancPluginGetVersion()
