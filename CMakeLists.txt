@@ -21,7 +21,7 @@ cmake_minimum_required(VERSION 2.8)
 
 project(WorklistFilePurger)
 
-SET(WORKLIST_FILE_PURGER_VERSION "0.1" CACHE STRING "Version of the plugin")
+SET(WORKLIST_FILE_PURGER_VERSION "0.2" CACHE STRING "Version of the plugin")
 SET(ALLOW_DOWNLOADS OFF CACHE BOOL "Allow CMake to download packages")
 
 SET(USE_SYSTEM_JSONCPP ON CACHE BOOL "Use the system version of JsonCpp")
