@@ -34,8 +34,91 @@
 #include <algorithm>
 
 #define DCM_TAG_STDIUID "0020,000d"
+#define DCM_TAG_ACCNO "0008,0050"
+#define WORKLIST_PURGE_CACHE "WorklistPurgeCache"
 static std::string folder_;
 
+bool worklistPurgerRESTStatus;
+
+
+static void CacheTheDetailsToLocalFile(const char* incomingFileStdIUID, const char* inComingFileAccessionNumber){
+  time_t t = time(0);   // get time now
+  struct tm * now = localtime( & t );
+
+  char pathBuffer [128] = {0};
+  strftime (pathBuffer, 128, "WorklistPurgeCache_%Y-%m-%d.json", now);
+
+  std::fstream jfile;
+  jfile.open (pathBuffer, std::ios::in);
+
+  Json::Reader reader;
+  Json::Value json_obj;
+
+  if(!reader.parse(jfile, json_obj, true))
+  {
+      // json file must contain an array
+      std::cerr << "could not parse the json file" << std::endl;
+      // return;
+  }
+
+  jfile.close();
+
+  Json::Value m_event;
+  m_event["study"]["accesionNo"] = inComingFileAccessionNumber;
+  m_event["study"]["studyIUID"] = incomingFileStdIUID;//msg;
+
+  // append to json object
+  json_obj.append(m_event);
+
+  std::cout << json_obj.toStyledString() << std::endl;
+
+  // write updated json object to file
+  jfile.open(pathBuffer, std::ios::out);
+  jfile << json_obj.toStyledString() << std::endl;
+  jfile.close();
+}
+
+//Checking for already processed DICOM instance. 
+bool IsThisStudyAlreadyProcessed(const char* incomingFileStdIUID, const char* inComingFileAccessionNumber){
+
+  bool bFoundAlreadyProcessedEntry = false;
+  time_t t = time(0);   // get time now
+  struct tm * now = localtime( & t );
+
+  char pathBuffer [128] = {0};
+  strftime (pathBuffer, 128, "WorklistPurgeCache_%Y-%m-%d.json", now);
+
+  std::fstream jfile;
+  jfile.open (pathBuffer, std::ios::in);
+
+  Json::Reader reader;
+  Json::Value json_obj;
+
+  if(!reader.parse(jfile, json_obj, true))
+  {
+      // json file must contain an array
+      std::cerr << "could not parse the json file" << std::endl;
+      return bFoundAlreadyProcessedEntry;
+  }
+
+  jfile.close();
+
+  for (int i = 0; i < json_obj.size(); i++){
+      
+      const char* studyIUIDCached = json_obj[i]["study"]["studyIUID"].asString().c_str();
+      const char* accNoCached = json_obj[i]["study"]["accesionNo"].asString().c_str();
+
+      
+      if(0 == strcmp(studyIUIDCached, incomingFileStdIUID) || 
+          0 == strcmp(accNoCached, inComingFileAccessionNumber)){
+              bFoundAlreadyProcessedEntry = true;
+
+              break;
+          }
+  }
+
+  return bFoundAlreadyProcessedEntry;
+}
 
 
 // Getting the tags of the created instance is done by a quick-and-dirty parsing of a JSON string.
@@ -49,10 +132,6 @@ static void getDicomTag(char* json, char* tag, char* tagValue, unsigned int len)
 		char tagText[100] = "\"";
 		strcat(tagText, tag);
 		strcat(tagText, "\" : \"");
-
-		//char buffer[10000];
-		//sprintf(buffer, "tagText[%d]=%s", strlen(tagText), tagText);
-		//OrthancPluginLogWarning(context, buffer);
 
 		char* value = strstr(jsonText, tagText);
 		int offset = strlen(tagText);
@@ -74,16 +153,13 @@ static void getDicomTag(char* json, char* tag, char* tagValue, unsigned int len)
 }
 
 static bool ReadAndVerifyWorklistFile(std::string& result,
-                     const std::string& path, const char* incomingFileStdIUID)
+                     const std::string& worklistPath, const char* incomingFileStdIUID, const char* inComingFileAccessionNumber)
 {
   
-  
-  
-
   OrthancPlugins::MemoryBuffer dicom;
   try{
     OrthancPluginContext* context = OrthancPlugins::GetGlobalContext();
-    dicom.ReadFile(path);
+    dicom.ReadFile(worklistPath);
 
     // Convert the DICOM as JSON, and dump it to the user in "--verbose" mode
     Json::Value json;
@@ -91,27 +167,50 @@ static bool ReadAndVerifyWorklistFile(std::string& result,
                       static_cast<OrthancPluginDicomToJsonFlags>(0), 0);
 
     char workliststdIUID[64] = {0};
+    char worklistAccNo[64] = {0};
+
+    bool bFoundStdIUID = false, bFoundAccessionNo = false;
     
     for (Json::Value::const_iterator it=json.begin(); it!=json.end(); ++it)
     {
       const char *dcmTag =  it.key().asString().c_str();
       if(0 == strcmp(DCM_TAG_STDIUID, dcmTag)){
         strcpy(workliststdIUID, it->asString().c_str());
+        bFoundStdIUID = true;
+      }
+
+      if(0 == strcmp(DCM_TAG_ACCNO, dcmTag)){
+        OrthancPlugins::LogWarning("Getting Accession No");
+        OrthancPlugins::LogWarning(it->asString().c_str());
+        strcpy(worklistAccNo, it->asString().c_str());
+        bFoundAccessionNo = true;
+      }
+
+      if(bFoundStdIUID){
         break;
       }
+
     }
 
-    char logBuffer[64] = {0};
+    if(!bFoundAccessionNo && !bFoundStdIUID){
+        OrthancPluginLogInfo(context, "StudyIUID and AccessionNo are empty in the Worklist file, hence returning");
+        return false;
+    }
+      
 
-    if(0 == strcmp(workliststdIUID, incomingFileStdIUID)){
+    char logBuffer[256] = {0};
+
+    if(0 == strcmp(workliststdIUID, incomingFileStdIUID) || 0 == strcmp(worklistAccNo, inComingFileAccessionNumber)){
       sprintf(logBuffer, "Found matching worklist");
       OrthancPluginLogInfo(context, logBuffer);
 
       memset(logBuffer, 0, sizeof(logBuffer));
 
-      sprintf(logBuffer, "Std IUID from Worklist file=%s\nStd IUID from incoming DICOM file=%s", workliststdIUID, incomingFileStdIUID);
+      sprintf(logBuffer, "Std IUID from Worklist file=%s\tStd IUID from incoming DICOM file=%s\nAccession No from Worklist=%s\tAccession No from incoming DICOM file=%s", 
+                  workliststdIUID, incomingFileStdIUID, worklistAccNo, inComingFileAccessionNumber);
 
       OrthancPluginLogInfo(context, logBuffer);
+      CacheTheDetailsToLocalFile(incomingFileStdIUID, inComingFileAccessionNumber);
       return true;
     }
 
@@ -126,19 +225,59 @@ static bool ReadAndVerifyWorklistFile(std::string& result,
 
 
 
+
+ORTHANC_PLUGINS_API OrthancPluginErrorCode EnableWorklistPurger(OrthancPluginRestOutput* output,
+  const char* url, const OrthancPluginHttpRequest* request) {
+    worklistPurgerRESTStatus = true;
+  std::string HtmlCode = "<html>\n<head>\n<title>Plugin1</title>\n</head>\n<body>Worklist Purger enabled</body>\n</html>\n";
+  OrthancPluginAnswerBuffer(OrthancPlugins::GetGlobalContext(), output, HtmlCode.c_str(), HtmlCode.length(), "text/html");
+  return OrthancPluginErrorCode_Success;
+}
+
+ORTHANC_PLUGINS_API OrthancPluginErrorCode DisableWorklistPurger(OrthancPluginRestOutput* output,
+  const char* url, const OrthancPluginHttpRequest* request) {
+    worklistPurgerRESTStatus = false;
+  std::string HtmlCode = "<html>\n<head>\n<title>Plugin1</title>\n</head>\n<body>Worklist Purger disabled</body>\n</html>\n";
+  OrthancPluginAnswerBuffer(OrthancPlugins::GetGlobalContext(), output, HtmlCode.c_str(), HtmlCode.length(), "text/html");
+  return OrthancPluginErrorCode_Success;
+}
+
+ORTHANC_PLUGINS_API OrthancPluginErrorCode WorklistPurgerStatus(OrthancPluginRestOutput* output,
+  const char* url, const OrthancPluginHttpRequest* request) {
+    if(worklistPurgerRESTStatus){
+      std::string HtmlCode = "<html>\n<head>\n<title>Plugin1</title>\n</head>\n<body>Worklist Purger Status is: Enabled</body>\n</html>\n";
+      OrthancPluginAnswerBuffer(OrthancPlugins::GetGlobalContext(), output, HtmlCode.c_str(), HtmlCode.length(), "text/html");
+    }
+    else
+    {
+      std::string HtmlCode = "<html>\n<head>\n<title>Plugin1</title>\n</head>\n<body>Worklist Purger Status is: Disabled</body>\n</html>\n";
+      OrthancPluginAnswerBuffer(OrthancPlugins::GetGlobalContext(), output, HtmlCode.c_str(), HtmlCode.length(), "text/html");
+    }
+  
+  return OrthancPluginErrorCode_Success;
+}
+
 OrthancPluginErrorCode OnStoredCallback(const OrthancPluginDicomInstance* instance,
                                         const char* instanceId)
 {
   OrthancPluginContext* context = OrthancPlugins::GetGlobalContext();
-  char buffer[1024];
+  char buffer[1024] = {0};
   sprintf(buffer, "Just received a DICOM instance of size %d and ID %s from origin %d (AET %s)", 
           (int) OrthancPluginGetInstanceSize(context, instance), instanceId, 
           OrthancPluginGetInstanceOrigin(context, instance),
           OrthancPluginGetInstanceRemoteAet(context, instance));
   OrthancPluginLogInfo(context, buffer);
 
+  if(!worklistPurgerRESTStatus){
+    memset(buffer, 0, sizeof(buffer));
+    sprintf(buffer, "\n******    WorklistFilesPurger Plugin disabled ******\n");
+    OrthancPluginLogInfo(context, buffer);
+    return OrthancPluginErrorCode_Success;
+  }
+  
 
   char studyInstanceUIDStr[64] = {0}; // Max length of UID can be 64
+  char accessionNumber[64] = {0};
   char buffer1[512] = {0};
 
   char* jsonIncomingDICOM;
@@ -146,9 +285,24 @@ OrthancPluginErrorCode OnStoredCallback(const OrthancPluginDicomInstance* instan
 
   // strcpy(studyInstanceUIDStr, "1.2.276.0.7230010.3.2.101");
   getDicomTag(jsonIncomingDICOM, "StudyInstanceUID", studyInstanceUIDStr, 64);  
+  getDicomTag(jsonIncomingDICOM, "AccessionNumber", accessionNumber, 64);  
 
-  sprintf(buffer1, "\n******\n\n    StudyInstanceUID=%s\n\n*********\n", studyInstanceUIDStr);
+  sprintf(buffer1, "\n******\n\n    StudyInstanceUID=%s\n    AccessionNumber=%s\n*********\n", studyInstanceUIDStr, accessionNumber);
   OrthancPluginLogInfo(context, buffer1);
+
+  if(strlen(studyInstanceUIDStr) == 0 && strlen(accessionNumber) == 0){
+
+    OrthancPlugins::LogWarning("Both Study IUID and Accesssion Number are empty in the received instance, hence returning");
+    return OrthancPluginErrorCode_Success;
+  }
+
+
+  // Checking for already processed Study
+  if(IsThisStudyAlreadyProcessed(studyInstanceUIDStr, accessionNumber)){
+
+    OrthancPluginLogInfo(context, "Worklist file purging already done for this instance");
+    return OrthancPluginErrorCode_Success;
+  }
 
   //Loop over the regular files in the database folder
   namespace fs = boost::filesystem;
@@ -172,13 +326,19 @@ OrthancPluginErrorCode OnStoredCallback(const OrthancPluginDicomInstance* instan
           {
 
             const char* filePath = it->path().string().c_str();
-            std::string result;
-            bool ok = ReadAndVerifyWorklistFile(result, filePath, studyInstanceUIDStr);
+            memset(buffer1, 0, sizeof(0));
+            sprintf(buffer1, "\n******    Worklist File Path =%s ******\n", filePath);
 
-            if(ok){
+            OrthancPluginLogInfo(context, buffer1);
+
+            
+            std::string result;
+            bool foundMatchingWorklist = ReadAndVerifyWorklistFile(result, filePath, studyInstanceUIDStr, accessionNumber);
+
+            if(foundMatchingWorklist){
 
               memset(buffer1, 0, sizeof(buffer1));
-              sprintf(buffer1, "\n******\n    Removing the worklist file %s\n*********\n", filePath);
+              sprintf(buffer1, "\n******    Removing the worklist file %s ******", filePath);
               OrthancPluginLogInfo(context, buffer1);
               
               remove(filePath);
@@ -220,49 +380,59 @@ extern "C"
       return -1;
     }
 
+    worklistPurgerRESTStatus = true;
 
     OrthancPlugins::LogWarning("WorklistFilePurger :  plugin is initializing");
-    OrthancPluginSetDescription(c, "Delete worklist file after receiving an instance in Orthanc PACS");
+    OrthancPluginSetDescription(c, "Delete worklist file after receiving a matching instance in Orthanc PACS");
 
 
     OrthancPlugins::OrthancConfiguration configuration;
 
-    OrthancPlugins::OrthancConfiguration worklists;
-    configuration.GetSection(worklists, "Worklists");
+    OrthancPlugins::OrthancConfiguration worklistsConf;
+    configuration.GetSection(worklistsConf, "Worklists");
 
-    bool enabled = worklists.GetBooleanValue("Enable", false);
+
+    bool enabled = worklistsConf.GetBooleanValue("Enable", false);
+
     if (enabled)
     {
-      if (worklists.LookupStringValue(folder_, "Database"))
+      if (worklistsConf.LookupStringValue(folder_, "Database"))
       {
+        //Registering Callbacks
+
         OrthancPluginRegisterOnStoredInstanceCallback(OrthancPlugins::GetGlobalContext(), OnStoredCallback);
+        OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/enableWorklistPurge", EnableWorklistPurger);
+        OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/disableWorklistPurge", DisableWorklistPurger);
+        OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/worklistPurgeStatus", WorklistPurgerStatus);
+
+
       }
       else
       {
-        OrthancPlugins::LogError("WorklistFilePurger : The configuration option \"Worklists.Database\" must contain a path");
+        OrthancPlugins::LogError("WorklistFilePurger : The configuration option \"Worklists.Database\" must contain a path in the ORthanc configuration file");
         return -1;
       }
 
     }
     else
     {
-      OrthancPlugins::LogWarning("WorklistFilePurger : Worklist server is disabled by the configuration file");
+      OrthancPlugins::LogWarning("WorklistFilePurger : Worklist server is disabled in the ORthanc configuration file");
     }
 
     return 0;
-    
+
   }
 
 
   ORTHANC_PLUGINS_API void OrthancPluginFinalize()
   {
-    OrthancPlugins::LogWarning("Worlist File Purger plugin is finalizing");
+    OrthancPlugins::LogWarning("WorklistFilePurger plugin is finalizing");
   }
 
 
   ORTHANC_PLUGINS_API const char* OrthancPluginGetName()
   {
-    return "worklist-files-purger";
+    return "worklist-file-purger";
   }
 
 
