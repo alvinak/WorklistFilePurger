@@ -22,7 +22,6 @@
 
 
 #include <orthanc/OrthancCPlugin.h>
-// #include "../../../../OrthancFramework/Sources/Compatibility.h"
 #include "../Common/OrthancPluginCppWrapper.h"
 
 
@@ -257,6 +256,32 @@ ORTHANC_PLUGINS_API OrthancPluginErrorCode WorklistPurgerStatus(OrthancPluginRes
   return OrthancPluginErrorCode_Success;
 }
 
+OrthancPluginErrorCode OnChangeCallback(OrthancPluginChangeType changeType,
+                                             OrthancPluginResourceType resourceType,
+                                             const char* resourceId)
+{
+  char info[1024];
+  OrthancPluginMemoryBuffer tmp;
+
+  sprintf(info, "Change %d on resource %s of type %d", changeType, resourceId, resourceType);
+  OrthancPluginLogWarning(OrthancPlugins::GetGlobalContext(), info);
+
+  if (changeType == OrthancPluginChangeType_NewInstance)
+  {
+    // sprintf(info, "/instances/%s/metadata/AnonymizedFrom", resourceId);
+    sprintf(info, "/instances/%s/metadata?expand", resourceId);
+    if (OrthancPluginRestApiGet(OrthancPlugins::GetGlobalContext(), &tmp, info) == 0)
+    {
+      sprintf(info, "\n*****  Instance %s comes from OnChangeCallback", resourceId);
+      strncat(info, (const char*) tmp.data, tmp.size);
+      OrthancPluginLogWarning(OrthancPlugins::GetGlobalContext(), info);
+      OrthancPluginFreeMemoryBuffer(OrthancPlugins::GetGlobalContext(), &tmp);
+    }
+  }
+
+  return OrthancPluginErrorCode_Success;
+}
+
 OrthancPluginErrorCode OnStoredCallback(const OrthancPluginDicomInstance* instance,
                                         const char* instanceId)
 {
@@ -404,6 +429,8 @@ extern "C"
         OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/enableWorklistPurge", EnableWorklistPurger);
         OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/disableWorklistPurge", DisableWorklistPurger);
         OrthancPluginRegisterRestCallback(OrthancPlugins::GetGlobalContext(), "/worklistPurgeStatus", WorklistPurgerStatus);
+	      
+	// OrthancPluginRegisterOnChangeCallback(OrthancPlugins::GetGlobalContext(), OnChangeCallback);
 
 
       }
